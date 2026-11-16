@@ -52,20 +52,26 @@ def smooth(t):
 
 # ----------------------------------------------------------------------------- timeline
 def build_timeline(take, song_len):
-    starts = TIMINGS[take]
+    cfg = TIMINGS[take]
     names = [s[0] for s in SECTIONS]
     sections, lines = [], []
     for i, (name, pal, ls) in enumerate(SECTIONS):
-        s0 = starts[name]
-        s1 = starts[names[i + 1]] if i + 1 < len(names) else song_len
-        sections.append({"name": name, "pal": pal, "start": s0, "end": s1})
+        s0 = cfg[name]
+        s1 = cfg[names[i + 1]] if i + 1 < len(names) else song_len
+        drop = cfg.get("drop")
+        if drop is not None and s0 < drop < s1:  # split off an instrumental drop section
+            sections.append({"name": name, "pal": pal, "start": s0, "end": drop})
+            sections.append({"name": "drop", "pal": "drop", "start": drop, "end": s1})
+        else:
+            sections.append({"name": name, "pal": pal, "start": s0, "end": s1})
+        fixed = cfg.get("line_times", {}).get(name)
         n = len(ls)
         pad = 0.4
         span = (s1 - s0 - 2 * pad) / n
         for j, (text, script, meaning) in enumerate(ls):
-            a = s0 + pad + j * span
+            a, b = fixed[j] if fixed else (s0 + pad + j * span, s0 + pad + (j + 1) * span)
             lines.append({"text": text, "script": script, "meaning": meaning,
-                          "start": a, "end": a + span, "section": name})
+                          "start": a, "end": b, "section": name})
     return sections, lines
 
 
@@ -224,10 +230,10 @@ def damru_path():
 
 # ----------------------------------------------------------------------------- text cache
 class TextCache:
-    def __init__(self, H):
+    def __init__(self, H, W):
         self.H = H
         self.cache = {}
-        k = H / 1080
+        k = H / 1080 if H <= W * 1.2 else W / 1080 * 1.25
         self.f_dev = self._font("NotoSansDevanagari.ttf", int(58 * k), b"SemiBold")
         self.f_dev_big = self._font("NotoSansDevanagari.ttf", int(120 * k), b"Bold")
         self.f_en = self._font("Montserrat.ttf", int(50 * k), b"ExtraBold")
@@ -236,29 +242,47 @@ class TextCache:
 
     def _font(self, name, size, var):
         f = ImageFont.truetype(os.path.join(FONT_DIR, name), size)
+        f._var = var
         try:
             f.set_variation_by_name(var)
         except Exception:
             pass
         return f
 
+    def _resize(self, font, size):
+        f = font.font_variant(size=size)
+        try:
+            f.set_variation_by_name(font._var)
+        except Exception:
+            pass
+        f._var = font._var
+        return f
+
     def get(self, text, font, colour, max_w=None, glow=None):
         key = (text, id(font), colour, max_w, glow)
         if key in self.cache:
             return self.cache[key]
-        if max_w:  # shrink to fit
+        rows = [text]
+        if max_w and font.getlength(text) > max_w and " " in text:  # wrap onto two lines
+            words = text.split(" ")
+            best = min(range(1, len(words)),
+                       key=lambda i: abs(font.getlength(" ".join(words[:i])) - font.getlength(" ".join(words[i:]))))
+            rows = [" ".join(words[:best]), " ".join(words[best:])]
+        if max_w:  # shrink only if a row still does not fit
             size = font.size
-            while font.getlength(text) > max_w and size > 12:
+            while max(font.getlength(r) for r in rows) > max_w and size > 12:
                 size -= 2
-                font = font.font_variant(size=size)
-        l, t, r, b = font.getbbox(text)
+                font = self._resize(font, size)
+        asc, desc = font.getmetrics()
+        line_h = int((asc + desc) * 1.08)
+        widths = [font.getlength(r) for r in rows]
         pad = int(self.H * 0.03)
-        w, h = int(r - l + 2 * pad), int(b - t + 2 * pad)
+        w, h = int(max(widths) + 2 * pad), int(line_h * len(rows) + 2 * pad)
         im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         d = ImageDraw.Draw(im)
-        # dark outline for legibility
-        d.text((pad - l, pad - t), text, font=font, fill=colour + (255,),
-               stroke_width=max(2, int(self.H / 360)), stroke_fill=(0, 0, 0, 200))
+        for i, r in enumerate(rows):  # dark outline for legibility, each row centred
+            d.text(((w - widths[i]) / 2, pad + i * line_h), r, font=font, fill=colour + (255,),
+                   stroke_width=max(2, int(self.H / 360)), stroke_fill=(0, 0, 0, 200))
         img = skia.Image.fromarray(np.array(im), colorType=skia.ColorType.kRGBA_8888_ColorType,
                                    alphaType=skia.AlphaType.kUnpremul_AlphaType)
         self.cache[key] = (img, w, h)
@@ -272,7 +296,7 @@ class Renderer:
         self.sections, self.lines = sections, lines
         self.beats, self.loud, self.bass = beats, loud, bass
         self.scn = Scenery(W, H)
-        self.text = TextCache(H)
+        self.text = TextCache(H, W)
         self.surface = skia.Surface(W, H)
         self.body = figure_paths()
         self.details = figure_details()
@@ -285,6 +309,7 @@ class Renderer:
         self.fig_x = W * 0.5
         self.fig_y = H * (0.80 if not self.portrait else 0.66)
         self.drop_t = next(s["start"] for s in sections if s["pal"] == "drop")
+        self.drop_end = max(s["end"] for s in sections if s["pal"] == "drop")
         self.rap_starts = [s["start"] for s in sections if s["pal"] == "rap"]
 
     # -- helpers
@@ -522,7 +547,7 @@ class Renderer:
         energy = float(self.loud[fi])
         drop_amt = 0.0
         if sec["pal"] == "drop":
-            drop_amt = smooth((t - sec["start"]) / 1.0) * smooth((sec["end"] - t) / 2.0)
+            drop_amt = smooth((t - self.drop_t) / 1.0) * smooth((self.drop_end - t) / 2.0)
         cv = self.surface.getCanvas()
         cv.save()
         zoom = 1 + 0.012 * pulse + 0.03 * drop_amt

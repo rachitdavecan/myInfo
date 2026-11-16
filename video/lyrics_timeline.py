@@ -65,8 +65,15 @@ SECTIONS = [
 ]
 
 # Section start times (seconds) per take, read from the vocal transcription of each take.
-# The last section runs to the end of the song.
+# The last section runs to the end of the song. Optional: "drop" = time of the instrumental drop
+# (gets its own blazing section), "line_times" = exact (start, end) per line for a section.
 TIMINGS = {
     "take1": {"intro": 0.0, "verse1": 18.0, "rap1": 48.0, "verse2": 67.0, "rap2": 84.0,
               "bridge": 97.0, "chorus": 117.0, "outro": 160.0},
+    # Take 3 (seed 108): cleanest take. Drums drop out at 1:45 (breakdown), full drop at 2:00.
+    "take3": {"intro": 0.0, "verse1": 20.5, "rap1": 56.8, "verse2": 75.5, "rap2": 94.6,
+              "bridge": 104.6, "chorus": 144.8, "outro": 173.4,
+              "drop": 120.0,
+              "line_times": {"intro": [(12.5, 20.2)],
+                             "bridge": [(105.0, 119.5), (141.2, 144.6)]}},
 }
